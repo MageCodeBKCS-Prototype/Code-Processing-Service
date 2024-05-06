@@ -10,7 +10,11 @@ class Config(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore")
 
     DATABASE_URL: MariaDBDsn
-    # REDIS_URL: RedisDsn
+    REDIS_URL: RedisDsn
+    RAILS_API_LOGIN_URL: str
+    RAILS_API_EMAIL: str
+    RAILS_API_PASSWORD: str
+    COLLECT_CODEQL_RESULT_URL: str
 
     SITE_DOMAIN: str = "magecode.com"
 
@@ -24,10 +28,13 @@ class Config(BaseSettings):
 
     APP_VERSION: str = "1"
 
+    MODEL_NAME: str
+    MODEL_PATH: str
+
 
 settings = Config()
 
-app_configs: dict[str, Any] = {"title": "MageCode API"}
+app_configs: dict[str, Any] = {"title": "MageCode Code Processing API"}
 if settings.ENVIRONMENT.is_deployed:
     app_configs["root_path"] = f"/api/v{settings.APP_VERSION}"
 
