@@ -32,7 +32,7 @@ def get_model_tokenizer(device: str, model_name: str, model_path: str):
 
     print("Model and Tokenizer loaded")
 
-    checkpoint = torch.load(model_path)
+    checkpoint = torch.load(model_path, map_location=device)
 
     # Reinitialize the ai_model architecture
     classifier = SimpleClassifier(input_size=768, hidden_size=1024, output_size=1, model=model)

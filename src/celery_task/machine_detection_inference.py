@@ -7,9 +7,14 @@ from sqlmodel import create_engine
 from src.celery_task.util import ModelInfo, ModelManager
 from src.config import settings
 
+# model_info_list = [
+#     ModelInfo(settings.MODEL_NAME, settings.MODEL_PATH, ["Python3"], "cuda")
+# ]
 model_info_list = [
-    ModelInfo(settings.MODEL_NAME, settings.MODEL_PATH, ["Python3"], "cuda")
+    ModelInfo(model_name, model_path, [language], settings.DEVICE)
+    for language, model_name, model_path in zip(settings.LANGUAGES, settings.MODEL_NAMES, settings.MODEL_PATHS)
 ]
+
 model_manager = ModelManager(model_info_list)
 model_manager.load()
 
@@ -32,7 +37,7 @@ def inference(data):
     model_info = model_manager.get_model_by_language(programming_language)
     if model_info is None:
         print("No model info found")
-        return 0
+        return -1
 
     try:
         fullpath = os.path.join(path, filename)

@@ -33,7 +33,7 @@ LANGUAGES = [
     },
     {
         "name": "Python3",
-        "value": "python3",
+        "value": "python",
         "extension": ".py"
     },
     {

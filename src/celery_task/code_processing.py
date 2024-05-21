@@ -1,6 +1,6 @@
-import shutil
 from datetime import datetime
 import requests
+import torch
 
 from celery import Celery
 from celery.result import AsyncResult
@@ -10,9 +10,12 @@ from src.config import settings
 from src.persistence import ReportFile, Report
 from src.constants import LANGUAGES
 import os
-from .util import codeql
+from .util import codeql, get_vulnerability_model_tokenizer
 
+vulnerability_tokenizer, vulnerability_model = get_vulnerability_model_tokenizer(settings.DEVICE, settings.VULNERABILITY_MODEL_NAME, settings.VULNERABILITY_MODEL_PATH)
 db_engine = create_engine(str(settings.DATABASE_URL))
+
+tensor_cwe_mapping = ["cwe-79", "cwe-125", "cwe-20", "cwe-787"]
 
 celery_app = Celery(
     "celery",
@@ -24,53 +27,57 @@ celery_app = Celery(
 
 @celery_app.task()
 def celery_machine_code_detection_task(data):
-    if not data["report_id"] or not data["path"] or not data["filename_list"]:
+    if not data["report_id"] or not data["path"] or not data["filename_list"] or not data["programming_language"]:
         print("validate failed")
         return
 
+    programming_language = data["programming_language"]
     filename_list: list[str] = data["filename_list"]
     path = data["path"]
     report_id = int(data["report_id"])
+
+    supported_extension = None
+    supported_language_name = None
+    for supported_language in LANGUAGES:
+        if programming_language == supported_language["value"]:
+            supported_extension = supported_language["extension"]
+            supported_language_name = supported_language["name"]
+            break
+
+    if supported_extension is None:
+        print("Language is not supported")
+        return
+
     report_files = []
     sent_task = []
 
     for filename in filename_list:
         extension = filename[filename.rindex("."):]
-        if not extension:
-            report_files.append(ReportFile(
-                    report_id=report_id,
-                    filename=filename,
-                    programming_language="undefined",
-                    machine_code_probability=0,
-                    created_at=datetime.now(),
-                    updated_at=datetime.now()))
+        if not extension or extension != supported_extension:
+            # report_files.append(ReportFile(
+            #         report_id=report_id,
+            #         filename=filename,
+            #         programming_language="undefined",
+            #         machine_code_probability=0,
+            #         created_at=datetime.now(),
+            #         updated_at=datetime.now()))
             continue
 
-        language_info = None
-        for language in LANGUAGES:
-            if language["extension"] == extension:
-                language_info = language
-        if language_info is not None:
-            data = {
-                "path": path,
-                "filename": filename,
-                "programming_language": language_info["name"]
-            }
-            task = celery_app.send_task('src.celery_task.machine_detection_inference.inference', args=[data], queue="inference")
-            sent_task.append({
-                "task": task,
-                "filename": filename,
-                "programming_language": language_info["name"]
-            })
-        else:
-            report_files.append(ReportFile(
-                    report_id=report_id,
-                    filename=filename,
-                    programming_language="undefined",
-                    machine_code_probability=0,
-                    created_at=datetime.now(),
-                    updated_at=datetime.now()))
-            continue
+        task_data = {
+            "path": path,
+            "filename": filename,
+            "programming_language": supported_language_name
+        }
+        task = celery_app.send_task(
+            'src.celery_task.machine_detection_inference.inference',
+            args=[task_data],
+            queue="inference"
+        )
+        sent_task.append({
+            "task": task,
+            "filename": filename,
+            "programming_language": supported_language_name
+        })
 
     while len(sent_task) > 0:
         remaining_task = []
@@ -121,38 +128,89 @@ def celery_machine_code_detection_task(data):
 
 @celery_app.task()
 def celery_codeql_task(data):
-    if not data or not isinstance(data, dict) or "path" not in data or "report_id" not in data:
+    if not data or not isinstance(data, dict) or "path" not in data or "report_id" not in data or "programming_language" not in data or "filename_list" not in data:
         print("Sent data is invalid: ", data)
         return
 
     path_to_source = data["path"]
     report_id = data["report_id"]
+    filename_list: list[str] = data["filename_list"]
+    programming_language = data["programming_language"]
+    results_folder = ""
+    success = True
 
-    if not os.path.exists(path_to_source) or not os.path.isdir(path_to_source):
-        print("Invalid folder path: " + path_to_source)
+    cwe_list = check_cwe(path_to_source, filename_list)
+
+    if len(cwe_list) == 0:
+        results_folder = codeql.create_results_folder(path_to_source)
+        print("Results folder created at:", results_folder)
+        codeql.create_empty_result(results_folder)
+
+        send_codeql_result(False, report_id, results_folder)
         return
 
-    database_folder = codeql.create_database_folder(path_to_source)
-    print("Database folder created at:", database_folder)
+    try:
+        if not os.path.exists(path_to_source) or not os.path.isdir(path_to_source):
+            print("Invalid folder path: " + path_to_source)
+            return
 
-    database_path = codeql.create_database("database", database_folder, path_to_source)
-    if database_path:
-        print(f"Database created at: {database_path}")
-    else:
-        print(f"Failed to create database")
+        database_folder = codeql.create_database_folder(path_to_source)
+        print("Database folder created at:", database_folder)
 
-    results_folder = codeql.create_results_folder(path_to_source)
-    print("Results folder created at:", results_folder)
+        database_path = codeql.create_database("database", database_folder, path_to_source, programming_language)
+        if database_path:
+            print(f"Database created at: {database_path}")
+        else:
+            print(f"Failed to create database")
 
-    for file in os.listdir(database_folder):
-        if file.endswith(".ql"):
-            print("Analyzing database:", file)
-            codeql.analyze_database(database_folder, results_folder, file)
-            print("Analysis completed.")
+        results_folder = codeql.create_results_folder(path_to_source)
+        print("Results folder created at:", results_folder)
 
-    codeql.merge_results(results_folder)
-    print("Results merged into a single file: codeql.csv")
+        for file in os.listdir(database_folder):
+            if file.endswith(".ql"):
+                print("Analyzing database:", file)
+                codeql.analyze_database(database_folder, results_folder, file, programming_language, cwe_list)
+                print("Analysis completed.")
 
+        codeql.merge_results(results_folder)
+        print("Results merged into a single file: codeql.csv")
+    except Exception as e:
+        print(e)
+        success = False
+
+    send_codeql_result(success, report_id, results_folder)
+
+
+def check_cwe(path_to_source, filename_list):
+    cwe_list = []
+    for filename in filename_list:
+        fullpath = os.path.join(path_to_source, filename)
+        with open(fullpath, "r") as f:
+            content = f.read()
+
+        if not content:
+            print("No content")
+            continue
+
+        with torch.no_grad():
+            tokenized_code = vulnerability_tokenizer(
+                content,
+                return_tensors="pt",
+                padding='max_length',
+                max_length=512,
+                truncation=True
+            ).to(settings.DEVICE)
+
+            result = vulnerability_model(tokenized_code)
+            for i in range(4):
+                scalar_result = result[0][i].item()
+                if scalar_result > 0.5 and tensor_cwe_mapping[i] not in cwe_list:
+                    cwe_list.append(tensor_cwe_mapping[i])
+
+    return cwe_list
+
+
+def send_codeql_result(process_status, report_id, results_folder):
     login_response = requests.post(
         settings.RAILS_API_LOGIN_URL,
         {
@@ -167,11 +225,10 @@ def celery_codeql_task(data):
 
     login_response_json = login_response.json()
     token = login_response_json['token']
-
     collect_codeql_response = requests.post(
         settings.COLLECT_CODEQL_RESULT_URL.replace(":report_id", report_id),
         {
-            "status": True,
+            "status": process_status,
             "result_dir": results_folder
         },
         headers={

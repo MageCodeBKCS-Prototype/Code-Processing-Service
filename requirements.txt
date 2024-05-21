@@ -7,3 +7,4 @@ celery~=5.4.0
 sqlmodel~=0.0.18
 requests~=2.31.0
 redis
+pymysql

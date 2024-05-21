@@ -28,8 +28,14 @@ class Config(BaseSettings):
 
     APP_VERSION: str = "1"
 
-    MODEL_NAME: str
-    MODEL_PATH: str
+    # MODEL_NAME: str
+    # MODEL_PATH: str
+    LANGUAGES: list[str]
+    MODEL_NAMES: list[str]
+    MODEL_PATHS: list[str]
+    DEVICE: str
+    VULNERABILITY_MODEL_NAME: str
+    VULNERABILITY_MODEL_PATH: str
 
 
 settings = Config()

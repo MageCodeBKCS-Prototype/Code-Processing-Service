@@ -12,3 +12,4 @@ class DatasetProcessInfo(SQLModel):
     folder_path: str
     dataset_id: str
     file_list: list[str]
+    programming_language: str
